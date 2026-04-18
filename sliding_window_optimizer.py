@@ -72,11 +72,11 @@ def solve_window_qubo(
             # 估计到达时间（简单假设匀速）
             est_arrival = k * 10  # 简单估计
 
-            # 时间窗口惩罚
+            # 时间窗口惩罚（二次惩罚）
             if est_arrival < sub_a[i]:
-                penalty = sub_a[i] - est_arrival
+                penalty = 10.0 * ((sub_a[i] - est_arrival) ** 2)
             elif est_arrival > sub_b[i]:
-                penalty = est_arrival - sub_b[i]
+                penalty = 20.0 * ((est_arrival - sub_b[i]) ** 2)
             else:
                 penalty = 0
 
@@ -215,11 +215,11 @@ def solve_window_qubo(
         # 服务时间
         current_time += s_i[node]
 
-        # 时间窗口检查
+        # 时间窗口检查（二次惩罚）
         if current_time < a_i[node]:
-            total_penalty += (a_i[node] - current_time)
+            total_penalty += 10.0 * ((a_i[node] - current_time) ** 2)
         elif current_time > b_i[node]:
-            total_penalty += (current_time - b_i[node])
+            total_penalty += 20.0 * ((current_time - b_i[node]) ** 2)
 
     total_cost = total_distance + lambda_weight * total_penalty
 
@@ -318,11 +318,11 @@ def sliding_window_optimization(
             # 服务时间
             current_time += s_i[path[i + 1]]
 
-            # 时间窗口检查
+            # 时间窗口检查（二次惩罚）
             if current_time < a_i[path[i + 1]]:
-                total_penalty += (a_i[path[i + 1]] - current_time)
+                total_penalty += 10.0 * ((a_i[path[i + 1]] - current_time) ** 2)
             elif current_time > b_i[path[i + 1]]:
-                total_penalty += (current_time - b_i[path[i + 1]])
+                total_penalty += 20.0 * ((current_time - b_i[path[i + 1]]) ** 2)
 
         total_cost = total_distance + lambda_weight * total_penalty
         return total_cost, total_distance, total_penalty
