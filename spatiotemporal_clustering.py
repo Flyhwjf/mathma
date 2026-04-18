@@ -4,7 +4,23 @@
 """
 
 import numpy as np
-from typing import List, Tuple, Dict, Any
+import logging
+from typing import List, Tuple, Dict, Any, TypedDict
+
+# 设置日志
+logger = logging.getLogger(__name__)
+
+
+class ClusteringResult(TypedDict):
+    """聚类结果类型定义"""
+    labels: np.ndarray
+    centroids: np.ndarray
+    clusters: List[List[int]]
+    spatiotemporal_dist: np.ndarray
+    cluster_stats: List[Dict[str, Any]]
+    history: List[Dict[str, Any]]
+    n_clusters: int
+    n_nodes: int
 
 
 def compute_spatiotemporal_distance_matrix(
@@ -46,10 +62,10 @@ def compute_spatiotemporal_distance_matrix(
 
     # 2. 计算时间距离
     # 时间距离 = |a_i - a_j| + |b_i - b_j|
-    temporal_dist = np.zeros((n, n))
-    for i in range(n):
-        for j in range(n):
-            temporal_dist[i, j] = abs(a_i[i] - a_i[j]) + abs(b_i[i] - b_i[j])
+    # 使用NumPy广播进行向量化计算
+    a_i_expanded = a_i[:, np.newaxis]  # Shape (n, 1)
+    b_i_expanded = b_i[:, np.newaxis]  # Shape (n, 1)
+    temporal_dist = np.abs(a_i_expanded - a_i) + np.abs(b_i_expanded - b_i)
 
     # 归一化时间距离
     temporal_max = temporal_dist.max()
@@ -75,7 +91,7 @@ def improved_kmeans_clustering(
     n_clusters: int = 4,
     max_iterations: int = 50,
     tolerance: float = 0.05
-) -> Tuple[np.ndarray, np.ndarray, List]:
+) -> Tuple[np.ndarray, np.ndarray, List[Dict[str, Any]]]:
     """
     改进的K-means聚类算法（基于距离矩阵）
 
@@ -116,7 +132,7 @@ def improved_kmeans_clustering(
         # 计算每个点到已有中心的最小距离
         min_distances = np.zeros(n)
         for i in range(n):
-            min_dist_to_centers = np.min([distance_matrix[i, c] for c in centroids[:k]])
+            min_dist_to_centers = np.min(distance_matrix[i, centroids[:k]])
             min_distances[i] = min_dist_to_centers
 
         # 选择最小距离最大的点作为新中心
@@ -129,7 +145,7 @@ def improved_kmeans_clustering(
     for iteration in range(max_iterations):
         # 分配点到最近的聚类中心
         for i in range(n):
-            distances_to_centers = [distance_matrix[i, c] for c in centroids]
+            distances_to_centers = distance_matrix[i, centroids]
             cluster_labels[i] = np.argmin(distances_to_centers)
 
         # 检查收敛
@@ -150,12 +166,26 @@ def improved_kmeans_clustering(
             if len(cluster_points) == 0:
                 # 空聚类处理：选择距离其他中心最远的点作为新中心
                 distances_to_other_centers = np.zeros(n)
-                for i in range(n):
-                    if i not in centroids:
-                        min_dist = np.min([distance_matrix[i, c] for c in centroids if c != centroids[k]])
-                        distances_to_other_centers[i] = min_dist
+                # 获取所有不是当前中心的中心点
+                other_centroids_mask = np.ones(n_clusters, dtype=bool)
+                other_centroids_mask[k] = False
+                other_centroids = centroids[other_centroids_mask]
+
+                if len(other_centroids) > 0:
+                    # 创建非中心点的掩码
+                    non_centroid_mask = np.ones(n, dtype=bool)
+                    non_centroid_mask[centroids] = False
+                    # 向量化计算每个非中心点到其他中心的最小距离
+                    if np.any(non_centroid_mask):
+                        # 获取所有非中心点的距离子矩阵
+                        non_centroid_distances = distance_matrix[non_centroid_mask][:, other_centroids]
+                        min_distances = np.min(non_centroid_distances, axis=1)
+                        # 将结果放回正确位置
+                        non_centroid_indices = np.where(non_centroid_mask)[0]
+                        distances_to_other_centers[non_centroid_indices] = min_distances
+
                 # 选择距离其他中心最远的点
-                if len(distances_to_other_centers) > 0:
+                if np.any(distances_to_other_centers > 0):
                     new_center = np.argmax(distances_to_other_centers)
                     new_centroids[k] = new_center
                 continue
@@ -166,7 +196,7 @@ def improved_kmeans_clustering(
                 # 计算点到同簇其他点的平均距离
                 same_cluster_points = cluster_points[cluster_points != point]
                 if len(same_cluster_points) > 0:
-                    avg_distances[idx] = np.mean([distance_matrix[point, p] for p in same_cluster_points])
+                    avg_distances[idx] = np.mean(distance_matrix[point, same_cluster_points])
                 else:
                     avg_distances[idx] = 0.0
 
@@ -208,7 +238,7 @@ def spatiotemporal_clustering(
     a_i: np.ndarray,
     b_i: np.ndarray,
     n_clusters: int = 4
-) -> Dict[str, Any]:
+) -> ClusteringResult:
     """
     时空聚类主函数
 
@@ -239,13 +269,13 @@ def spatiotemporal_clustering(
         raise ValueError(f"聚类数量应在[1, {n}]范围内，实际为{n_clusters}")
 
     # 1. 计算时空距离矩阵
-    print(f"计算时空距离矩阵 (n={n})...")
+    logger.info(f"计算时空距离矩阵 (n={n})...")
     spatiotemporal_dist = compute_spatiotemporal_distance_matrix(
         dist_matrix, a_i, b_i, spatial_weight=0.6, temporal_weight=0.4
     )
 
     # 2. 执行改进的K-means聚类
-    print(f"执行改进的K-means聚类 (k={n_clusters})...")
+    logger.info(f"执行改进的K-means聚类 (k={n_clusters})...")
     cluster_labels, centroids, history = improved_kmeans_clustering(
         spatiotemporal_dist, n_clusters=n_clusters, max_iterations=50
     )
@@ -270,14 +300,14 @@ def spatiotemporal_clustering(
             })
             continue
 
-        # 计算簇内平均距离
-        intra_distances = []
-        for i in cluster_indices:
-            for j in cluster_indices:
-                if i < j:  # 避免重复计算
-                    intra_distances.append(spatiotemporal_dist[i, j])
+        # 计算簇内平均距离 - 使用向量化计算
+        # 获取簇内点的距离子矩阵
+        cluster_dist_submatrix = spatiotemporal_dist[np.ix_(cluster_indices, cluster_indices)]
+        # 获取上三角部分（不包括对角线）
+        upper_tri_indices = np.triu_indices(len(cluster_indices), k=1)
+        intra_distances = cluster_dist_submatrix[upper_tri_indices]
 
-        avg_intra_distance = np.mean(intra_distances) if intra_distances else 0.0
+        avg_intra_distance = np.mean(intra_distances) if len(intra_distances) > 0 else 0.0
 
         # 获取中心点对应的节点ID
         center_idx = centroids[k]
@@ -302,10 +332,10 @@ def spatiotemporal_clustering(
         'n_nodes': n
     }
 
-    print(f"时空聚类完成！共{n}个节点分为{n_clusters}个聚类。")
+    logger.info(f"时空聚类完成！共{n}个节点分为{n_clusters}个聚类。")
     for stat in cluster_stats:
-        print(f"  聚类{stat['cluster_id']}: {stat['size']}个节点，"
-              f"中心节点{stat['center_node_id']}，"
-              f"平均簇内距离{stat['avg_intra_cluster_distance']:.4f}")
+        logger.info(f"  聚类{stat['cluster_id']}: {stat['size']}个节点，"
+                    f"中心节点{stat['center_node_id']}，"
+                    f"平均簇内距离{stat['avg_intra_cluster_distance']:.4f}")
 
     return result

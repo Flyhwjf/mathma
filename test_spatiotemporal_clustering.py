@@ -191,7 +191,7 @@ def test_spatiotemporal_clustering():
     spatiotemporal_dist = result['spatiotemporal_dist']
     assert spatiotemporal_dist.shape == (n, n), f"距离矩阵形状应为({n},{n})，实际为{spatiotemporal_dist.shape}"
     assert np.allclose(spatiotemporal_dist.diagonal(), 0.0), "对角线应为0"
-    assert np.all(spatiotemporal_dist >= -1e-10), "所有距离应为非负"  # 允许小的负值（浮点误差）
+    assert np.allclose(spatiotemporal_dist, np.maximum(spatiotemporal_dist, 0), atol=1e-10), "所有距离应为非负"
 
     # 检查对称性（考虑浮点误差）
     max_diff = np.max(np.abs(spatiotemporal_dist - spatiotemporal_dist.T))
@@ -221,12 +221,78 @@ def test_spatiotemporal_clustering():
     return True
 
 
+def test_edge_cases():
+    """测试边界情况"""
+    print("测试边界情况...")
+
+    # 测试1: 单节点情况
+    print("测试单节点情况...")
+    node_ids = [1]
+    dist_matrix = np.array([[0.0]])
+    a_i = np.array([0])
+    b_i = np.array([5])
+
+    result = spatiotemporal_clustering(node_ids, dist_matrix, a_i, b_i, n_clusters=1)
+    assert result['n_nodes'] == 1
+    assert result['n_clusters'] == 1
+    assert result['labels'][0] == 0
+    assert len(result['clusters'][0]) == 1
+    assert result['clusters'][0][0] == 1
+
+    # 测试2: n_clusters = n (每个节点一个聚类)
+    print("测试n_clusters = n情况...")
+    n = 3
+    node_ids = list(range(n))
+    dist_matrix = np.array([
+        [0.0, 10.0, 20.0],
+        [10.0, 0.0, 15.0],
+        [20.0, 15.0, 0.0]
+    ])
+    a_i = np.array([0, 2, 4])
+    b_i = np.array([5, 7, 9])
+
+    result = spatiotemporal_clustering(node_ids, dist_matrix, a_i, b_i, n_clusters=n)
+    assert result['n_nodes'] == n
+    assert result['n_clusters'] == n
+    # 每个聚类应该只有一个节点
+    for cluster in result['clusters']:
+        assert len(cluster) == 1
+
+    # 测试3: 无效输入 - n_clusters > n
+    print("测试无效输入: n_clusters > n...")
+    try:
+        result = spatiotemporal_clustering(node_ids, dist_matrix, a_i, b_i, n_clusters=n+1)
+        assert False, "应抛出ValueError异常"
+    except ValueError as e:
+        assert "聚类数量应在[1" in str(e)
+
+    # 测试4: 无效输入 - n_clusters <= 0
+    print("测试无效输入: n_clusters <= 0...")
+    try:
+        result = spatiotemporal_clustering(node_ids, dist_matrix, a_i, b_i, n_clusters=0)
+        assert False, "应抛出ValueError异常"
+    except ValueError as e:
+        assert "聚类数量应在[1" in str(e)
+
+    # 测试5: 空节点列表
+    print("测试无效输入: 空节点列表...")
+    try:
+        result = spatiotemporal_clustering([], np.array([]), np.array([]), np.array([]), n_clusters=1)
+        assert False, "应抛出ValueError异常"
+    except ValueError as e:
+        assert "节点ID列表不能为空" in str(e)
+
+    print("边界情况测试通过！")
+    return True
+
+
 def run_all_tests():
     """运行所有测试"""
     tests = [
         test_compute_spatiotemporal_distance_matrix,
         test_improved_kmeans_clustering,
-        test_spatiotemporal_clustering
+        test_spatiotemporal_clustering,
+        test_edge_cases
     ]
 
     for test_func in tests:
