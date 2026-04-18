@@ -5,7 +5,6 @@
 
 import numpy as np
 from typing import List, Tuple, Dict, Any
-import warnings
 
 
 def evaluate_boundary_violations(
@@ -28,7 +27,7 @@ def evaluate_boundary_violations(
         violation_scores: 违反程度分数列表
         violation_info: 违反信息字典
     """
-    pass
+    raise NotImplementedError
 
 
 def migrate_boundary_points(
@@ -47,7 +46,7 @@ def migrate_boundary_points(
     返回:
         updated_labels: 更新后的聚类标签数组
     """
-    pass
+    raise NotImplementedError
 
 
 def iterative_refinement_controller(
@@ -78,4 +77,4 @@ def iterative_refinement_controller(
             - 'iteration_history': 迭代历史记录
             - 'converged': 是否收敛标志
     """
-    pass
+    raise NotImplementedError

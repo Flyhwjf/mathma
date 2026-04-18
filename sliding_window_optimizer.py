@@ -5,7 +5,6 @@
 
 import numpy as np
 from typing import List, Tuple, Dict, Any
-import warnings
 
 
 def solve_window_qubo(
@@ -32,7 +31,7 @@ def solve_window_qubo(
         total_cost: 总成本（距离+惩罚）
         qubo_info: QUBO求解相关信息字典
     """
-    pass
+    raise NotImplementedError
 
 
 def sliding_window_optimization(
@@ -60,4 +59,4 @@ def sliding_window_optimization(
         optimized_path: 优化后的路径序列
         window_history: 每个窗口的优化历史记录列表
     """
-    pass
+    raise NotImplementedError

@@ -7,7 +7,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import List, Tuple, Dict, Any
-import warnings
 
 
 def plot_clustering_results(
@@ -30,7 +29,7 @@ def plot_clustering_results(
     返回:
         fig: matplotlib图形对象
     """
-    pass
+    raise NotImplementedError
 
 
 def plot_window_optimization(
@@ -49,7 +48,7 @@ def plot_window_optimization(
     返回:
         fig: matplotlib图形对象
     """
-    pass
+    raise NotImplementedError
 
 
 def plot_iteration_progress(
@@ -66,7 +65,7 @@ def plot_iteration_progress(
     返回:
         fig: matplotlib图形对象
     """
-    pass
+    raise NotImplementedError
 
 
 def plot_hierarchical_path(
@@ -87,4 +86,4 @@ def plot_hierarchical_path(
     返回:
         fig: matplotlib图形对象
     """
-    pass
+    raise NotImplementedError

@@ -5,7 +5,6 @@
 
 import numpy as np
 from typing import List, Tuple, Dict, Any
-import warnings
 
 
 def compute_spatiotemporal_distance_matrix(
@@ -28,7 +27,7 @@ def compute_spatiotemporal_distance_matrix(
     返回:
         spatiotemporal_dist: 时空综合距离矩阵 (n x n)
     """
-    pass
+    raise NotImplementedError
 
 
 def improved_kmeans_clustering(
@@ -51,7 +50,7 @@ def improved_kmeans_clustering(
         centroids: 聚类中心索引数组 (n_clusters,)
         history: 迭代历史记录列表
     """
-    pass
+    raise NotImplementedError
 
 
 def spatiotemporal_clustering(
@@ -78,4 +77,4 @@ def spatiotemporal_clustering(
             - 'clusters': 按聚类分组的节点ID列表
             - 'spatiotemporal_dist': 时空距离矩阵
     """
-    pass
+    raise NotImplementedError
