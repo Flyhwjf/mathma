@@ -22,21 +22,27 @@ def evaluate_boundary_violations(
     cluster_labels: np.ndarray,
     path_sequence: List[int],
     penalties_by_node: np.ndarray,
-    threshold_multiplier: float = 2.0
+    dist_matrix: np.ndarray,
+    threshold_multiplier: float = 2.0,
+    crossing_threshold: float = 0.2,
+    cost_imbalance_threshold: float = 1.5
 ) -> Tuple[List[int], List[float], Dict[str, Any]]:
     """
-    评估边界点违反情况
+    评估边界点违反情况和触发重新聚类的条件
 
     参数:
         cluster_labels: 聚类标签数组
         path_sequence: 当前路径序列
         penalties_by_node: 每个节点的时间窗口惩罚值数组
+        dist_matrix: 距离矩阵
         threshold_multiplier: 边界点判定阈值乘数 (默认2.0)
+        crossing_threshold: 路径交叉阈值 (默认0.2，即20%)
+        cost_imbalance_threshold: 成本不平衡阈值 (默认1.5)
 
     返回:
         boundary_points: 边界点索引列表
         violation_scores: 违反程度分数列表
-        violation_info: 违反信息字典
+        violation_info: 违反信息字典（包含所有触发条件）
     """
     n = len(path_sequence)
 
@@ -79,14 +85,49 @@ def evaluate_boundary_violations(
 
         violation_scores.append(violation_score)
 
-    # 4. 构建违反信息字典
+    # 4. 检查路径交叉触发条件
+    has_crossing, crossing_info = _detect_path_crossing(
+        path_sequence, cluster_labels, dist_matrix, crossing_threshold
+    )
+
+    # 5. 检查聚类成本不平衡触发条件
+    cluster_costs, cost_info = _compute_cluster_costs(
+        path_sequence, cluster_labels, dist_matrix, penalties_by_node
+    )
+
+    cost_imbalance_triggered = False
+    if cost_info['average_cost'] > 0:
+        cost_imbalance_triggered = cost_info['cost_imbalance_ratio'] > cost_imbalance_threshold
+
+    # 6. 构建完整的违反信息字典
     violation_info = {
+        # 边界点惩罚信息
         'average_penalty': average_penalty,
         'threshold': threshold,
         'violation_count': violation_count,
         'violation_rate': violation_count / len(boundary_points) if boundary_points else 0.0,
         'boundary_points_count': len(boundary_points),
-        'total_points': n
+        'total_points': n,
+
+        # 路径交叉信息
+        'has_path_crossing': has_crossing,
+        'path_crossing_info': crossing_info,
+
+        # 聚类成本信息
+        'cluster_costs': cluster_costs,
+        'average_cluster_cost': cost_info['average_cost'],
+        'max_cluster_cost': cost_info['max_cost'],
+        'min_cluster_cost': cost_info['min_cost'],
+        'cost_imbalance_ratio': cost_info['cost_imbalance_ratio'],
+        'cost_imbalance_triggered': cost_imbalance_triggered,
+
+        # 触发条件汇总
+        'triggers': {
+            'boundary_penalty_trigger': violation_count > 0,
+            'path_crossing_trigger': has_crossing,
+            'cost_imbalance_trigger': cost_imbalance_triggered,
+            'any_trigger': violation_count > 0 or has_crossing or cost_imbalance_triggered
+        }
     }
 
     return boundary_points, violation_scores, violation_info
@@ -95,7 +136,9 @@ def evaluate_boundary_violations(
 def migrate_boundary_points(
     cluster_labels: np.ndarray,
     boundary_points: List[int],
-    distance_matrix: np.ndarray
+    distance_matrix: np.ndarray,
+    path_sequence: List[int] = None,
+    adjacency_threshold: float = 0.3
 ) -> np.ndarray:
     """
     迁移边界点到更合适的聚类
@@ -104,6 +147,8 @@ def migrate_boundary_points(
         cluster_labels: 当前聚类标签数组
         boundary_points: 边界点索引列表
         distance_matrix: 距离矩阵
+        path_sequence: 路径序列（用于检测相邻聚类）
+        adjacency_threshold: 相邻性阈值（默认0.3，即30%）
 
     返回:
         updated_labels: 更新后的聚类标签数组
@@ -121,19 +166,17 @@ def migrate_boundary_points(
     for point in boundary_points:
         current_cluster = cluster_labels[point]
 
-        # 找到相邻聚类（排除当前聚类）
-        adjacent_clusters = []
-        for cluster in unique_clusters:
-            if cluster != current_cluster:
-                # 检查是否有属于该聚类的点与当前点相邻（在距离矩阵中距离较小）
-                # 这里我们简单地将所有其他聚类视为相邻聚类
-                adjacent_clusters.append(cluster)
+        # 找到相邻聚类（改进版）
+        adjacent_clusters = _find_adjacent_clusters(
+            point, current_cluster, cluster_labels, distance_matrix,
+            path_sequence, adjacency_threshold
+        )
 
         # 如果没有相邻聚类，跳过
         if not adjacent_clusters:
             continue
 
-        # 计算当前点到每个聚类的平均距离
+        # 计算当前点到每个相邻聚类的平均距离
         avg_distances = []
         for cluster in adjacent_clusters:
             # 找到属于该聚类的所有点
@@ -164,6 +207,238 @@ def migrate_boundary_points(
                     updated_labels[point] = best_cluster
 
     return updated_labels
+
+
+def _find_adjacent_clusters(
+    point: int,
+    current_cluster: int,
+    cluster_labels: np.ndarray,
+    distance_matrix: np.ndarray,
+    path_sequence: List[int] = None,
+    adjacency_threshold: float = 0.3
+) -> List[int]:
+    """
+    找到与给定点相邻的聚类
+
+    参数:
+        point: 当前点索引
+        current_cluster: 当前聚类ID
+        cluster_labels: 聚类标签数组
+        distance_matrix: 距离矩阵
+        path_sequence: 路径序列
+        adjacency_threshold: 相邻性阈值
+
+    返回:
+        adjacent_clusters: 相邻聚类ID列表
+    """
+    unique_clusters = np.unique(cluster_labels)
+    adjacent_clusters = []
+
+    # 方法1: 基于路径的相邻性检测
+    if path_sequence is not None:
+        # 找到点在路径中的位置
+        if point in path_sequence:
+            point_idx = path_sequence.index(point)
+
+            # 检查路径中相邻的聚类
+            for offset in [-2, -1, 1, 2]:  # 检查前后2个位置
+                check_idx = point_idx + offset
+                if 0 <= check_idx < len(path_sequence):
+                    neighbor_point = path_sequence[check_idx]
+                    neighbor_cluster = cluster_labels[neighbor_point]
+                    if neighbor_cluster != current_cluster and neighbor_cluster not in adjacent_clusters:
+                        adjacent_clusters.append(neighbor_cluster)
+
+    # 方法2: 基于距离的相邻性检测
+    if not adjacent_clusters:
+        # 计算当前点到所有其他点的平均距离
+        all_distances = distance_matrix[point]
+        avg_distance = np.mean(all_distances[all_distances > 0]) if np.any(all_distances > 0) else 0
+
+        if avg_distance > 0:
+            for cluster in unique_clusters:
+                if cluster == current_cluster:
+                    continue
+
+                # 找到属于该聚类的所有点
+                cluster_points = np.where(cluster_labels == cluster)[0]
+                if len(cluster_points) == 0:
+                    continue
+
+                # 计算当前点到该聚类点的平均距离
+                cluster_distances = distance_matrix[point, cluster_points]
+                avg_cluster_distance = np.mean(cluster_distances)
+
+                # 如果平均距离小于阈值，则认为是相邻聚类
+                if avg_cluster_distance < avg_distance * adjacency_threshold:
+                    adjacent_clusters.append(cluster)
+
+    # 如果以上方法都没有找到相邻聚类，返回所有其他聚类（保持向后兼容）
+    if not adjacent_clusters:
+        adjacent_clusters = [c for c in unique_clusters if c != current_cluster]
+
+    return adjacent_clusters
+
+
+def _detect_path_crossing(
+    path: List[int],
+    cluster_labels: np.ndarray,
+    dist_matrix: np.ndarray,
+    crossing_threshold: float = 0.2
+) -> Tuple[bool, Dict[str, Any]]:
+    """
+    检测路径交叉情况
+
+    参数:
+        path: 路径序列
+        cluster_labels: 聚类标签数组
+        dist_matrix: 距离矩阵
+        crossing_threshold: 交叉阈值 (默认0.2，即20%)
+
+    返回:
+        has_crossing: 是否存在显著交叉
+        crossing_info: 交叉信息字典
+    """
+    n = len(path)
+    crossing_info = {
+        'has_crossing': False,
+        'crossing_pairs': [],
+        'crossing_ratios': [],
+        'max_crossing_ratio': 0.0,
+        'total_crossing_segments': 0
+    }
+
+    if n < 4:  # 至少需要4个点才能有交叉
+        return False, crossing_info
+
+    # 识别聚类边界
+    cluster_boundaries = []
+    for i in range(n-1):
+        if cluster_labels[path[i]] != cluster_labels[path[i+1]]:
+            cluster_boundaries.append(i)  # 边界在i和i+1之间
+
+    if len(cluster_boundaries) < 2:  # 至少需要2个边界才能有交叉
+        return False, crossing_info
+
+    # 检查相邻聚类之间的路径段
+    crossing_pairs = []
+    crossing_ratios = []
+
+    for i in range(len(cluster_boundaries)-1):
+        # 获取两个相邻边界
+        boundary1 = cluster_boundaries[i]
+        boundary2 = cluster_boundaries[i+1]
+
+        # 获取聚类ID
+        cluster1 = cluster_labels[path[boundary1]]
+        cluster2 = cluster_labels[path[boundary2]]
+
+        if cluster1 == cluster2:
+            continue  # 同一聚类，跳过
+
+        # 计算路径段长度（从boundary1到boundary2+1）
+        path_segment_length = 0.0
+        for j in range(boundary1, boundary2):
+            path_segment_length += dist_matrix[path[j], path[j+1]]
+
+        # 计算聚类中心之间的直接距离
+        # 找到聚类1和聚类2的中心点（使用路径中的第一个点作为代表）
+        cluster1_points = [path[j] for j in range(n) if cluster_labels[path[j]] == cluster1]
+        cluster2_points = [path[j] for j in range(n) if cluster_labels[path[j]] == cluster2]
+
+        if not cluster1_points or not cluster2_points:
+            continue
+
+        # 使用聚类中第一个点的距离作为代表
+        direct_distance = dist_matrix[cluster1_points[0], cluster2_points[0]]
+
+        if direct_distance > 0:
+            crossing_ratio = path_segment_length / direct_distance
+            if crossing_ratio > (1.0 + crossing_threshold):  # 路径长度 > 直接距离 * (1 + 阈值)
+                crossing_pairs.append((cluster1, cluster2))
+                crossing_ratios.append(crossing_ratio)
+
+    if crossing_pairs:
+        crossing_info.update({
+            'has_crossing': True,
+            'crossing_pairs': crossing_pairs,
+            'crossing_ratios': crossing_ratios,
+            'max_crossing_ratio': max(crossing_ratios) if crossing_ratios else 0.0,
+            'total_crossing_segments': len(crossing_pairs)
+        })
+        return True, crossing_info
+
+    return False, crossing_info
+
+
+def _compute_cluster_costs(
+    path: List[int],
+    cluster_labels: np.ndarray,
+    dist_matrix: np.ndarray,
+    penalties_by_node: np.ndarray
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    计算每个聚类的综合成本
+
+    参数:
+        path: 路径序列
+        cluster_labels: 聚类标签数组
+        dist_matrix: 距离矩阵
+        penalties_by_node: 每个节点的惩罚值数组
+
+    返回:
+        cluster_costs: 每个聚类的成本数组
+        cost_info: 成本信息字典
+    """
+    unique_clusters = np.unique(cluster_labels)
+    n_clusters = len(unique_clusters)
+    cluster_costs = np.zeros(n_clusters)
+
+    # 计算每个聚类的成本
+    for i, cluster_id in enumerate(unique_clusters):
+        # 找到属于该聚类的所有节点
+        cluster_nodes = [node for node in path if cluster_labels[node] == cluster_id]
+
+        if not cluster_nodes:
+            continue
+
+        # 计算聚类内的旅行距离
+        cluster_distance = 0.0
+        for j in range(len(cluster_nodes)-1):
+            node1 = cluster_nodes[j]
+            # 找到node1在完整路径中的位置
+            pos1 = path.index(node1)
+            # 找到下一个同聚类节点在路径中的位置
+            next_cluster_node = None
+            for k in range(pos1+1, len(path)):
+                if cluster_labels[path[k]] == cluster_id:
+                    next_cluster_node = path[k]
+                    break
+
+            if next_cluster_node:
+                cluster_distance += dist_matrix[node1, next_cluster_node]
+
+        # 计算聚类内的总惩罚
+        cluster_penalty = sum(penalties_by_node[node] for node in cluster_nodes)
+
+        # 综合成本 = 距离 + 惩罚
+        cluster_costs[i] = cluster_distance + cluster_penalty
+
+    # 计算成本统计信息
+    avg_cost = np.mean(cluster_costs) if n_clusters > 0 else 0.0
+    max_cost = np.max(cluster_costs) if n_clusters > 0 else 0.0
+    min_cost = np.min(cluster_costs) if n_clusters > 0 else 0.0
+
+    cost_info = {
+        'cluster_costs': cluster_costs,
+        'average_cost': avg_cost,
+        'max_cost': max_cost,
+        'min_cost': min_cost,
+        'cost_imbalance_ratio': (max_cost / avg_cost) if avg_cost > 0 else 0.0,
+        'n_clusters': n_clusters
+    }
+
+    return cluster_costs, cost_info
 
 
 def _compute_path_cost_and_penalties(
@@ -361,12 +636,15 @@ def iterative_refinement_controller(
     for iteration in range(1, max_iterations + 1):
         logger.info(f"迭代 {iteration}/{max_iterations}...")
 
-        # 3.1 评估边界点违反情况
+        # 3.1 评估边界点违反情况和触发条件
         boundary_points, violation_scores, violation_info = evaluate_boundary_violations(
             cluster_labels=current_labels,
             path_sequence=full_path,
             penalties_by_node=penalties_by_node,
-            threshold_multiplier=2.0
+            dist_matrix=dist_matrix,
+            threshold_multiplier=2.0,
+            crossing_threshold=0.2,
+            cost_imbalance_threshold=1.5
         )
 
         # 3.2 迁移边界点
@@ -374,26 +652,115 @@ def iterative_refinement_controller(
         current_labels = migrate_boundary_points(
             cluster_labels=current_labels,
             boundary_points=boundary_points,
-            distance_matrix=dist_matrix
+            distance_matrix=dist_matrix,
+            path_sequence=full_path,
+            adjacency_threshold=0.3
         )
 
         # 计算聚类变化
         cluster_changes = np.sum(current_labels != old_labels)
 
-        # 3.3 如果聚类发生变化，重新优化
-        if cluster_changes > 0:
-            logger.info(f"聚类发生变化，重新优化... (变化数: {cluster_changes})")
+        # 3.3 检查是否需要重新优化（基于触发条件或聚类变化）
+        need_reoptimization = (
+            cluster_changes > 0 or  # 聚类发生变化
+            violation_info['triggers']['any_trigger']  # 任何触发条件满足
+        )
 
-            # 重新聚类和优化
-            # 注意：这里简化处理，实际可能需要重新运行完整的聚类和优化流程
-            # 对于简化实现，我们只重新计算受影响的聚类
+        if need_reoptimization:
+            trigger_reasons = []
+            if cluster_changes > 0:
+                trigger_reasons.append(f"聚类变化({cluster_changes})")
+            if violation_info['triggers']['boundary_penalty_trigger']:
+                trigger_reasons.append("边界点惩罚触发")
+            if violation_info['triggers']['path_crossing_trigger']:
+                trigger_reasons.append("路径交叉触发")
+            if violation_info['triggers']['cost_imbalance_trigger']:
+                trigger_reasons.append("成本不平衡触发")
 
-            # 重新计算惩罚值（简化：使用相同路径）
-            total_cost, penalties_by_node = _compute_path_cost_and_penalties(
-                full_path, dist_matrix, a_i, b_i, s_i
-            )
+            logger.info(f"触发重新优化: {', '.join(trigger_reasons)}")
+
+            # 重新聚类和优化受影响的部分
+            if cluster_changes > 0 or violation_info['triggers']['any_trigger']:
+                # 如果触发条件强烈，重新运行完整的聚类和优化
+                if (violation_info['triggers']['path_crossing_trigger'] or
+                    violation_info['triggers']['cost_imbalance_trigger'] or
+                    cluster_changes > n * 0.1):  # 超过10%的节点发生变化
+
+                    logger.info("执行完整重新聚类和优化...")
+
+                    # 重新聚类
+                    clustering_result = spatiotemporal_clustering(
+                        node_ids=node_ids,
+                        dist_matrix=dist_matrix,
+                        a_i=a_i,
+                        b_i=b_i,
+                        n_clusters=min(4, n)
+                    )
+                    current_labels = clustering_result['labels']
+                    n_clusters = clustering_result['n_clusters']
+
+                    # 重新优化所有聚类
+                    all_cluster_paths = []
+                    all_cluster_costs = []
+                    penalties_by_node = np.zeros(n)
+
+                    for cluster_id in range(n_clusters):
+                        cluster_indices = np.where(current_labels == cluster_id)[0]
+                        if len(cluster_indices) == 0:
+                            continue
+
+                        cluster_node_ids = [node_ids[i] for i in cluster_indices]
+                        cluster_path, _ = sliding_window_optimization(
+                            cluster_points=cluster_node_ids,
+                            dist_matrix=dist_matrix,
+                            a_i=a_i,
+                            b_i=b_i,
+                            s_i=s_i,
+                            window_size=min(10, len(cluster_node_ids)),
+                            step_size=max(1, min(5, len(cluster_node_ids) // 2))
+                        )
+
+                        cluster_cost, cluster_penalties = _compute_path_cost_and_penalties(
+                            cluster_path, dist_matrix, a_i, b_i, s_i
+                        )
+
+                        all_cluster_paths.append(cluster_path)
+                        all_cluster_costs.append(cluster_cost)
+
+                        for node_idx in cluster_path:
+                            penalties_by_node[node_idx] = cluster_penalties[node_idx]
+
+                    # 重新构建完整路径
+                    full_path = []
+                    depot_added = False
+
+                    for cluster_path in all_cluster_paths:
+                        if not depot_added and cluster_path and cluster_path[0] == 0:
+                            full_path.append(0)
+                            depot_added = True
+                            for node in cluster_path[1:]:
+                                if node not in full_path:
+                                    full_path.append(node)
+                        else:
+                            for node in cluster_path:
+                                if node == 0 and depot_added:
+                                    continue
+                                if node not in full_path:
+                                    full_path.append(node)
+
+                    if set(full_path) != set(node_ids):
+                        missing_nodes = set(node_ids) - set(full_path)
+                        full_path.extend(list(missing_nodes))
+
+                    total_cost = sum(all_cluster_costs)
+                else:
+                    # 只重新计算惩罚值（简化处理）
+                    logger.info("重新计算惩罚值...")
+                    total_cost, penalties_by_node = _compute_path_cost_and_penalties(
+                        full_path, dist_matrix, a_i, b_i, s_i
+                    )
         else:
-            logger.info("聚类未发生变化")
+            logger.info("无需重新优化")
 
         # 3.4 记录迭代历史
         iteration_history.append({
