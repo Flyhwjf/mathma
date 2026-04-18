@@ -34,9 +34,9 @@ def solve_window_qubo(
         total_cost: 总成本（距离+惩罚）
         qubo_info: QUBO求解相关信息字典
     """
-    # 确保窗口包含仓库0
-    if 0 not in window_points:
-        window_points = [0] + window_points
+    # 注意：对于滑动窗口优化，窗口可能不包含仓库0
+    # 我们优化窗口内的节点顺序，不添加额外节点
+    # 保持窗口节点集合不变
 
     n = len(window_points)
 
@@ -55,13 +55,13 @@ def solve_window_qubo(
     qubo_size = n * n
     Q = np.zeros((qubo_size, qubo_size))
 
-    # 距离项
+    # 距离项（线性路径，非循环）
     for i in range(n):
         for j in range(n):
             if i != j:
-                for k in range(n):
+                for k in range(n - 1):  # 只连接位置k到k+1，不连接最后一个位置回到第一个
                     idx1 = i * n + k
-                    idx2 = j * n + ((k + 1) % n)
+                    idx2 = j * n + (k + 1)
                     Q[idx1, idx2] += sub_dist[i, j]
 
     # 时间窗口惩罚项
@@ -191,8 +191,8 @@ def solve_window_qubo(
             node_idx = pos_to_node[pos]
             window_path.append(window_points[node_idx])
 
-    # 确保路径以仓库0开始
-    if window_path[0] != 0:
+    # 如果路径包含仓库0，确保以仓库0开始
+    if 0 in window_path and window_path[0] != 0:
         # 找到仓库0的位置并旋转路径
         depot_idx = window_path.index(0)
         window_path = window_path[depot_idx:] + window_path[:depot_idx]
